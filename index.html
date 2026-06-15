@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>供应链进度管理面板</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Supply Chain Dashboard</p>
+        <h1>供应链进度管理面板</h1>
+      </div>
+      <div class="top-actions">
+        <button class="btn btn-primary" id="addProductBtn" type="button">新增产品</button>
+        <button class="btn" id="importBtn" type="button">导入数据</button>
+        <button class="btn" id="exportBtn" type="button">导出数据</button>
+        <button class="btn btn-danger-soft" id="clearAllBtn" type="button">清空数据</button>
+        <input id="importFileInput" type="file" accept="application/json,.json" hidden>
+      </div>
+    </header>
+
+    <main>
+      <section class="stats-grid" aria-label="数据统计">
+        <article class="stat-card">
+          <span>产品总数</span>
+          <strong id="statTotal">0</strong>
+        </article>
+        <article class="stat-card">
+          <span>进行中产品数</span>
+          <strong id="statActive">0</strong>
+        </article>
+        <article class="stat-card">
+          <span>临近交期产品数</span>
+          <strong id="statNearDue">0</strong>
+        </article>
+        <article class="stat-card">
+          <span>高风险产品数</span>
+          <strong id="statHighRisk">0</strong>
+        </article>
+        <article class="stat-card">
+          <span>已逾期产品数</span>
+          <strong id="statOverdue">0</strong>
+        </article>
+      </section>
+
+      <section class="filter-panel" aria-label="搜索筛选">
+        <div class="field">
+          <label for="searchName">产品名称</label>
+          <input id="searchName" type="search" placeholder="搜索产品名称">
+        </div>
+        <div class="field">
+          <label for="searchSku">SKU / 编号</label>
+          <input id="searchSku" type="search" placeholder="搜索 SKU">
+        </div>
+        <div class="field">
+          <label for="searchFactory">工厂名称</label>
+          <input id="searchFactory" type="search" placeholder="搜索工厂">
+        </div>
+        <div class="field">
+          <label for="filterStage">当前阶段</label>
+          <select id="filterStage"></select>
+        </div>
+        <div class="field">
+          <label for="filterRisk">风险等级</label>
+          <select id="filterRisk"></select>
+        </div>
+        <div class="field">
+          <label for="sortDue">交期排序</label>
+          <select id="sortDue">
+            <option value="asc">交期从近到远</option>
+            <option value="desc">交期从远到近</option>
+            <option value="none">不排序</option>
+          </select>
+        </div>
+        <button class="btn btn-ghost" id="resetFiltersBtn" type="button">重置筛选</button>
+      </section>
+
+      <section class="list-header">
+        <div>
+          <h2>产品列表</h2>
+          <p id="resultCount">共 0 个产品</p>
+        </div>
+      </section>
+
+      <section class="product-grid" id="productGrid" aria-live="polite"></section>
+      <section class="empty-state hidden" id="emptyState">
+        <h3>暂无匹配产品</h3>
+        <p>可以调整筛选条件，或新增一个产品项目。</p>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal-backdrop hidden" id="productModal" role="dialog" aria-modal="true" aria-labelledby="productModalTitle">
+    <div class="modal product-modal">
+      <div class="modal-header">
+        <div>
+          <p class="eyebrow">Product</p>
+          <h2 id="productModalTitle">新增产品</h2>
+        </div>
+        <button class="icon-btn" id="closeProductModalBtn" type="button" aria-label="关闭">×</button>
+      </div>
+      <form id="productForm" class="form-grid">
+        <input type="hidden" id="productId">
+        <div class="field required">
+          <label for="productName">产品名称</label>
+          <input id="productName" type="text" maxlength="80" required>
+        </div>
+        <div class="field required">
+          <label for="productSku">SKU / 编号</label>
+          <input id="productSku" type="text" maxlength="60" required>
+        </div>
+        <div class="field required">
+          <label for="factoryName">工厂名称</label>
+          <input id="factoryName" type="text" maxlength="80" required>
+        </div>
+        <div class="field">
+          <label for="factoryContact">工厂联系人</label>
+          <input id="factoryContact" type="text" maxlength="80">
+        </div>
+        <div class="field required">
+          <label for="owner">内部负责人</label>
+          <input id="owner" type="text" maxlength="60" required>
+        </div>
+        <div class="field required">
+          <label for="startDate">项目开始日期</label>
+          <input id="startDate" type="date" required>
+        </div>
+        <div class="field required">
+          <label for="dueDate">预计交期</label>
+          <input id="dueDate" type="date" required>
+        </div>
+        <div class="field required">
+          <label for="stage">当前阶段</label>
+          <select id="stage" required></select>
+        </div>
+        <div class="field required">
+          <label for="risk">风险等级</label>
+          <select id="risk" required></select>
+        </div>
+        <div class="field image-field">
+          <label for="productImage">产品图片</label>
+          <input id="productImage" type="file" accept="image/*">
+          <input id="imageData" type="hidden">
+          <div class="image-preview" id="imagePreview">无图片</div>
+          <button class="btn btn-ghost" id="removeImageBtn" type="button">移除图片</button>
+        </div>
+        <div class="field full">
+          <label for="notes">备注</label>
+          <textarea id="notes" rows="4" maxlength="500"></textarea>
+        </div>
+        <div class="form-actions full">
+          <button class="btn" id="cancelProductBtn" type="button">取消</button>
+          <button class="btn btn-primary" type="submit">保存产品</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-backdrop hidden" id="detailModal" role="dialog" aria-modal="true" aria-labelledby="detailTitle">
+    <div class="modal detail-modal">
+      <div class="modal-header">
+        <div>
+          <p class="eyebrow">Detail</p>
+          <h2 id="detailTitle">产品详情</h2>
+        </div>
+        <button class="icon-btn" id="closeDetailModalBtn" type="button" aria-label="关闭">×</button>
+      </div>
+      <div id="detailBody"></div>
+    </div>
+  </div>
+
+  <template id="timelineFormTemplate">
+    <form id="timelineForm" class="timeline-form">
+      <h3>新增时间线记录</h3>
+      <div class="form-grid compact">
+        <div class="field required">
+          <label for="recordTime">记录时间</label>
+          <input id="recordTime" type="datetime-local" required>
+        </div>
+        <div class="field required">
+          <label for="actionType">操作类型</label>
+          <select id="actionType" required></select>
+        </div>
+        <div class="field required">
+          <label for="timelineStatus">状态</label>
+          <select id="timelineStatus" required></select>
+        </div>
+        <div class="field">
+          <label for="nextDeadline">下一步截止时间</label>
+          <input id="nextDeadline" type="date">
+        </div>
+        <div class="field full required">
+          <label for="recordContent">记录内容</label>
+          <textarea id="recordContent" rows="3" maxlength="500" required></textarea>
+        </div>
+        <div class="field full">
+          <label for="nextAction">下一步动作</label>
+          <textarea id="nextAction" rows="2" maxlength="300"></textarea>
+        </div>
+        <div class="field full">
+          <label for="timelineNotes">备注</label>
+          <textarea id="timelineNotes" rows="2" maxlength="300"></textarea>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">添加记录</button>
+      </div>
+    </form>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>
