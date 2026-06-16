@@ -547,16 +547,22 @@
     const id = els.productId.value || crypto.randomUUID();
     setSyncStatus("正在保存产品...");
 
-    if (state.pendingImageFile) {
-      const imageUrl = await uploadProductImage(state.pendingImageFile, id);
-      if (!imageUrl) return;
-      payload.image = imageUrl;
-    }
+    try {
+      if (state.pendingImageFile) {
+        const imageUrl = await uploadProductImage(state.pendingImageFile, id);
+        if (!imageUrl) return;
+        payload.image = imageUrl;
+      }
 
-    if (els.productId.value) {
-      await updateProduct(id, payload);
-    } else {
-      await createProduct(id, payload);
+      if (els.productId.value) {
+        await updateProduct(id, payload);
+      } else {
+        await createProduct(id, payload);
+      }
+    } catch (error) {
+      const message = `保存失败：${error.message || error}`;
+      setSyncStatus(message);
+      alert(message);
     }
   }
 
@@ -564,14 +570,19 @@
     const user = await requireCurrentUser();
     if (!user) return;
     const row = toProductRow(id, payload, user.id);
-    const { data, error } = await supabaseClient
-      .from("products")
-      .insert(row)
-      .select()
-      .single();
+    const { data, error } = await withTimeout(
+      supabaseClient
+        .from("products")
+        .insert(row)
+        .select()
+        .single(),
+      "保存产品超时，请检查网络或 Supabase RLS 设置。"
+    );
 
     if (error) {
-      setSyncStatus(`保存失败：${error.message}`);
+      const message = `保存失败：${error.message}`;
+      setSyncStatus(message);
+      alert(message);
       return;
     }
 
@@ -590,16 +601,21 @@
     delete row.user_id;
     delete row.created_at;
 
-    const { data, error } = await supabaseClient
-      .from("products")
-      .update(row)
-      .eq("id", id)
-      .eq("user_id", user.id)
-      .select()
-      .single();
+    const { data, error } = await withTimeout(
+      supabaseClient
+        .from("products")
+        .update(row)
+        .eq("id", id)
+        .eq("user_id", user.id)
+        .select()
+        .single(),
+      "更新产品超时，请检查网络或 Supabase RLS 设置。"
+    );
 
     if (error) {
-      setSyncStatus(`保存失败：${error.message}`);
+      const message = `保存失败：${error.message}`;
+      setSyncStatus(message);
+      alert(message);
       return;
     }
 
@@ -689,16 +705,21 @@
     if (!user) return "";
     const extension = getFileExtension(file.name);
     const path = `${user.id}/${productId}/${crypto.randomUUID()}.${extension}`;
-    const { error } = await supabaseClient.storage
-      .from(IMAGE_BUCKET)
-      .upload(path, file, {
-        cacheControl: "3600",
-        contentType: file.type || "image/jpeg",
-        upsert: false
-      });
+    const { error } = await withTimeout(
+      supabaseClient.storage
+        .from(IMAGE_BUCKET)
+        .upload(path, file, {
+          cacheControl: "3600",
+          contentType: file.type || "image/jpeg",
+          upsert: false
+        }),
+      "图片上传超时，请检查网络或 Storage policy 设置。"
+    );
 
     if (error) {
-      setSyncStatus(`图片上传失败：${error.message}`);
+      const message = `图片上传失败：${error.message}`;
+      setSyncStatus(message);
+      alert(message);
       return "";
     }
 
@@ -793,7 +814,13 @@
     fillSelect(document.getElementById("actionType"), ACTION_TYPES);
     fillSelect(document.getElementById("timelineStatus"), TIMELINE_STATUSES);
     document.getElementById("recordTime").value = toDateTimeInput(new Date());
-    document.getElementById("timelineForm").addEventListener("submit", handleTimelineSubmit);
+    const form = document.getElementById("timelineForm");
+    const submitButton = form.querySelector("button.btn-primary");
+    if (submitButton) {
+      submitButton.type = "button";
+      submitButton.addEventListener("click", () => saveTimelineFromForm(form));
+    }
+    form.addEventListener("submit", handleTimelineSubmit);
   }
 
   function renderTimelineList(product) {
@@ -832,53 +859,64 @@
 
   async function handleTimelineSubmit(event) {
     event.preventDefault();
+    await saveTimelineFromForm(event.currentTarget);
+  }
+
+  async function saveTimelineFromForm(form) {
     const user = await requireCurrentUser();
     if (!user) return;
     const product = findProduct(state.selectedProductId);
     if (!product) return;
 
-    const form = event.currentTarget;
     if (!form.reportValidity()) return;
     const submitButton = form.querySelector('button[type="submit"]');
     setTimelineFormMessage("");
     if (submitButton) submitButton.disabled = true;
 
-    const row = {
-      id: crypto.randomUUID(),
-      product_id: product.id,
-      user_id: user.id,
-      log_date: toIsoFromLocal(document.getElementById("recordTime").value),
-      type: document.getElementById("actionType").value,
-      content: trimValue(document.getElementById("recordContent")),
-      next_step: trimValue(document.getElementById("nextAction")) || null,
-      deadline: document.getElementById("nextDeadline").value || null,
-      status: document.getElementById("timelineStatus").value,
-      note: trimValue(document.getElementById("timelineNotes")) || null
-    };
+    try {
+      const row = {
+        id: crypto.randomUUID(),
+        product_id: product.id,
+        user_id: user.id,
+        log_date: toIsoFromLocal(document.getElementById("recordTime").value),
+        type: document.getElementById("actionType").value,
+        content: trimValue(document.getElementById("recordContent")),
+        next_step: trimValue(document.getElementById("nextAction")) || null,
+        deadline: document.getElementById("nextDeadline").value || null,
+        status: document.getElementById("timelineStatus").value,
+        note: trimValue(document.getElementById("timelineNotes")) || null
+      };
 
-    setSyncStatus("正在保存时间线...");
-    setTimelineFormMessage("正在保存时间线...", true);
-    const { data, error } = await supabaseClient
-      .from("product_logs")
-      .insert(row)
-      .select()
-      .single();
+      setSyncStatus("正在保存时间线...");
+      setTimelineFormMessage("正在保存时间线...", true);
+      const { data, error } = await withTimeout(
+        supabaseClient
+          .from("product_logs")
+          .insert(row)
+          .select()
+          .single(),
+        "保存时间线超时，请检查网络或 Supabase RLS 设置。"
+      );
 
-    if (error) {
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      await touchProduct(product.id);
+      product.timeline = Array.isArray(product.timeline) ? product.timeline : [];
+      product.timeline.push(normalizeLog(data));
+      product.updatedAt = new Date().toISOString();
+      render();
+      renderDetail(product);
+      setSyncStatus("时间线已保存");
+    } catch (error) {
+      const message = `添加记录失败：${error.message || error}`;
+      setSyncStatus(message);
+      setTimelineFormMessage(message);
+      alert(message);
+    } finally {
       if (submitButton) submitButton.disabled = false;
-      setSyncStatus(`保存时间线失败：${error.message}`);
-      setTimelineFormMessage(`添加记录失败：${error.message}`);
-      return;
     }
-
-    await touchProduct(product.id);
-    product.timeline = Array.isArray(product.timeline) ? product.timeline : [];
-    product.timeline.push(normalizeLog(data));
-    product.updatedAt = new Date().toISOString();
-    render();
-    renderDetail(product);
-    setSyncStatus("时间线已保存");
-    if (submitButton) submitButton.disabled = false;
   }
 
   async function deleteTimelineItem(timelineId) {
@@ -1261,6 +1299,15 @@
 
   function setSyncStatus(message) {
     els.syncStatus.textContent = message || "";
+  }
+
+  function withTimeout(promise, message, timeoutMs = 15000) {
+    return Promise.race([
+      promise,
+      new Promise((_resolve, reject) => {
+        window.setTimeout(() => reject(new Error(message)), timeoutMs);
+      })
+    ]);
   }
 
   function setTimelineFormMessage(message, success) {
