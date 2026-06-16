@@ -1,7 +1,10 @@
 (function () {
   "use strict";
 
+  const SUPABASE_URL = "https://cfwcpdouizirzfyiylmv.supabase.co";
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNmd2NwZG91aXppcnpmeWl5bG12Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE1MTI0ODksImV4cCI6MjA5NzA4ODQ4OX0.9L3fGJ8Q2SyH78tpIFNiEdyQPACSAHcnYm7dkGjjqMc";
   const STORAGE_KEY = "supplyChainProgressDashboard.v1";
+  const IMAGE_BUCKET = "product-images";
   const STAGES = ["报价中", "打样中", "样品确认", "生产中", "验货中", "已出货", "已完成", "暂停"];
   const RISKS = ["正常", "关注", "高风险", "已逾期"];
   const ACTION_TYPES = ["报价", "打样", "修改", "确认", "生产", "验货", "发货", "付款", "其他"];
@@ -9,23 +12,64 @@
 
   const state = {
     products: [],
-    selectedProductId: null
+    selectedProductId: null,
+    session: null,
+    user: null,
+    pendingImageFile: null,
+    realtimeChannel: null,
+    refreshTimer: null
   };
 
+  let supabaseClient = null;
   const els = {};
 
   document.addEventListener("DOMContentLoaded", init);
 
-  function init() {
+  async function init() {
     cacheElements();
     populateStaticSelects();
     bindEvents();
-    loadData();
-    render();
+
+    const configured = setupSupabase();
+    if (!configured) {
+      showAuth("请先在 app.js 中填写 Supabase anon public key。");
+      return;
+    }
+
+    const { data, error } = await supabaseClient.auth.getSession();
+    if (error) {
+      showAuth(error.message);
+      return;
+    }
+
+    await handleSession(data.session);
+    supabaseClient.auth.onAuthStateChange((_event, session) => {
+      handleSession(session);
+    });
+  }
+
+  function setupSupabase() {
+    if (!window.supabase || !SUPABASE_URL || SUPABASE_ANON_KEY.includes("PASTE_")) {
+      return false;
+    }
+    supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    return true;
   }
 
   function cacheElements() {
     Object.assign(els, {
+      authView: document.getElementById("authView"),
+      authForm: document.getElementById("authForm"),
+      authEmail: document.getElementById("authEmail"),
+      authPassword: document.getElementById("authPassword"),
+      loginBtn: document.getElementById("loginBtn"),
+      registerBtn: document.getElementById("registerBtn"),
+      authMessage: document.getElementById("authMessage"),
+      appShell: document.getElementById("appShell"),
+      userInfo: document.getElementById("userInfo"),
+      syncStatus: document.getElementById("syncStatus"),
+      signOutBtn: document.getElementById("signOutBtn"),
+      migrateLocalBtn: document.getElementById("migrateLocalBtn"),
       addProductBtn: document.getElementById("addProductBtn"),
       importBtn: document.getElementById("importBtn"),
       exportBtn: document.getElementById("exportBtn"),
@@ -98,6 +142,10 @@
   }
 
   function bindEvents() {
+    els.authForm.addEventListener("submit", handleLogin);
+    els.registerBtn.addEventListener("click", handleRegister);
+    els.signOutBtn.addEventListener("click", handleSignOut);
+    els.migrateLocalBtn.addEventListener("click", migrateLocalData);
     els.addProductBtn.addEventListener("click", openCreateProductModal);
     els.closeProductModalBtn.addEventListener("click", closeProductModal);
     els.cancelProductBtn.addEventListener("click", closeProductModal);
@@ -122,39 +170,206 @@
     document.addEventListener("keydown", handleEscape);
   }
 
-  function loadData() {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      state.products = getDefaultProducts();
-      saveData();
+  async function handleSession(session) {
+    state.session = session;
+    state.user = session && session.user ? session.user : null;
+    state.selectedProductId = null;
+
+    if (!state.user) {
+      stopRealtime();
+      state.products = [];
+      showAuth("");
+      render();
       return;
     }
 
-    try {
-      const parsed = JSON.parse(raw);
-      const checked = validateImportData(parsed);
-      if (!checked.valid) {
-        throw new Error(checked.message);
-      }
-      state.products = checked.products;
-    } catch (error) {
-      console.warn("本地数据损坏，已恢复默认示例数据：", error);
-      state.products = getDefaultProducts();
-      saveData();
+    showApp();
+    await loadCloudData();
+    startRealtime();
+  }
+
+  async function handleLogin(event) {
+    event.preventDefault();
+    setAuthMessage("");
+    setAuthBusy(true);
+    const { error } = await supabaseClient.auth.signInWithPassword({
+      email: trimValue(els.authEmail),
+      password: els.authPassword.value
+    });
+    setAuthBusy(false);
+    if (error) setAuthMessage(`登录失败：${error.message}`);
+  }
+
+  async function handleRegister() {
+    setAuthMessage("");
+    if (!els.authForm.reportValidity()) return;
+    setAuthBusy(true);
+    const { data, error } = await supabaseClient.auth.signUp({
+      email: trimValue(els.authEmail),
+      password: els.authPassword.value
+    });
+    setAuthBusy(false);
+    if (error) {
+      setAuthMessage(`注册失败：${error.message}`);
+      return;
+    }
+    if (!data.session) {
+      setAuthMessage("注册成功，请按邮箱提示完成确认后再登录。", true);
     }
   }
 
-  function saveData() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      version: 1,
-      updatedAt: new Date().toISOString(),
-      products: state.products
-    }));
+  async function handleSignOut() {
+    stopRealtime();
+    await supabaseClient.auth.signOut();
+  }
+
+  function showAuth(message) {
+    els.authView.classList.remove("hidden");
+    els.appShell.classList.add("hidden");
+    setAuthMessage(message || "");
+  }
+
+  function showApp() {
+    els.authView.classList.add("hidden");
+    els.appShell.classList.remove("hidden");
+    els.userInfo.textContent = state.user.email || state.user.id;
+    updateMigrationButton();
+  }
+
+  async function loadCloudData() {
+    if (!state.user) return;
+    setSyncStatus("正在从 Supabase 读取数据...");
+
+    const { data: products, error: productError } = await supabaseClient
+      .from("products")
+      .select("*")
+      .eq("user_id", state.user.id)
+      .order("updated_at", { ascending: false });
+
+    if (productError) {
+      setSyncStatus(`读取产品失败：${productError.message}`);
+      return;
+    }
+
+    const productIds = (products || []).map((item) => item.id);
+    let logs = [];
+    if (productIds.length) {
+      const { data: logRows, error: logError } = await supabaseClient
+        .from("product_logs")
+        .select("*")
+        .eq("user_id", state.user.id)
+        .in("product_id", productIds)
+        .order("log_date", { ascending: false });
+
+      if (logError) {
+        setSyncStatus(`读取时间线失败：${logError.message}`);
+        return;
+      }
+      logs = logRows || [];
+    }
+
+    const logsByProduct = new Map();
+    logs.forEach((log) => {
+      if (!logsByProduct.has(log.product_id)) logsByProduct.set(log.product_id, []);
+      logsByProduct.get(log.product_id).push(normalizeLog(log));
+    });
+
+    state.products = (products || []).map((product) => normalizeProduct(product, logsByProduct.get(product.id) || []));
+    render();
+    setSyncStatus(`已同步 ${state.products.length} 个产品`);
+  }
+
+  function startRealtime() {
+    if (!state.user) return;
+    stopRealtime();
+
+    state.realtimeChannel = supabaseClient
+      .channel(`supply-chain-sync-${state.user.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "products",
+          filter: `user_id=eq.${state.user.id}`
+        },
+        scheduleCloudRefresh
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "product_logs",
+          filter: `user_id=eq.${state.user.id}`
+        },
+        scheduleCloudRefresh
+      )
+      .subscribe((status) => {
+        if (status === "SUBSCRIBED") {
+          setSyncStatus(`已同步 ${state.products.length} 个产品，实时同步已连接`);
+        }
+      });
+  }
+
+  function stopRealtime() {
+    if (state.refreshTimer) {
+      clearTimeout(state.refreshTimer);
+      state.refreshTimer = null;
+    }
+    if (state.realtimeChannel) {
+      supabaseClient.removeChannel(state.realtimeChannel);
+      state.realtimeChannel = null;
+    }
+  }
+
+  function scheduleCloudRefresh() {
+    if (state.refreshTimer) clearTimeout(state.refreshTimer);
+    state.refreshTimer = setTimeout(() => {
+      state.refreshTimer = null;
+      loadCloudData();
+    }, 400);
+  }
+
+  function normalizeProduct(row, timeline) {
+    return {
+      id: row.id,
+      name: row.name || "",
+      sku: row.sku || "",
+      factoryName: row.factory || "",
+      factoryContact: row.factory_contact || "",
+      owner: row.owner || "",
+      image: row.image_url || "",
+      startDate: row.start_date || "",
+      dueDate: row.due_date || "",
+      stage: row.status || "报价中",
+      risk: row.risk || "正常",
+      notes: row.note || "",
+      createdAt: row.created_at || "",
+      updatedAt: row.updated_at || "",
+      timeline
+    };
+  }
+
+  function normalizeLog(row) {
+    return {
+      id: row.id,
+      productId: row.product_id,
+      recordTime: row.log_date || row.created_at || "",
+      actionType: row.type || "其他",
+      content: row.content || "",
+      nextAction: row.next_step || "",
+      nextDeadline: row.deadline || "",
+      status: row.status || "待处理",
+      notes: row.note || "",
+      createdAt: row.created_at || ""
+    };
   }
 
   function render() {
     renderStats();
     renderProductList();
+    updateMigrationButton();
   }
 
   function renderStats() {
@@ -282,6 +497,7 @@
   function openEditProductModal(id) {
     const product = findProduct(id);
     if (!product) return;
+    state.pendingImageFile = null;
     els.productModalTitle.textContent = "编辑产品";
     els.productId.value = product.id;
     els.productName.value = product.name;
@@ -304,9 +520,10 @@
     closeModal(els.productModal);
   }
 
-  function handleProductSubmit(event) {
+  async function handleProductSubmit(event) {
     event.preventDefault();
-    if (!els.productForm.reportValidity()) return;
+    const user = await requireCurrentUser();
+    if (!user || !els.productForm.reportValidity()) return;
 
     const payload = {
       name: trimValue(els.productName),
@@ -327,39 +544,120 @@
       return;
     }
 
-    const id = els.productId.value;
-    if (id) {
-      const index = state.products.findIndex((item) => item.id === id);
-      if (index !== -1) {
-        state.products[index] = {
-          ...state.products[index],
-          ...payload,
-          updatedAt: new Date().toISOString()
-        };
-      }
-    } else {
-      state.products.unshift({
-        id: createId("product"),
-        ...payload,
-        timeline: [],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      });
+    const id = els.productId.value || crypto.randomUUID();
+    setSyncStatus("正在保存产品...");
+
+    if (state.pendingImageFile) {
+      const imageUrl = await uploadProductImage(state.pendingImageFile, id);
+      if (!imageUrl) return;
+      payload.image = imageUrl;
     }
 
-    saveData();
-    render();
-    closeProductModal();
+    if (els.productId.value) {
+      await updateProduct(id, payload);
+    } else {
+      await createProduct(id, payload);
+    }
   }
 
-  function deleteProduct(id) {
+  async function createProduct(id, payload) {
+    const user = await requireCurrentUser();
+    if (!user) return;
+    const row = toProductRow(id, payload, user.id);
+    const { data, error } = await supabaseClient
+      .from("products")
+      .insert(row)
+      .select()
+      .single();
+
+    if (error) {
+      setSyncStatus(`保存失败：${error.message}`);
+      return;
+    }
+
+    state.products.unshift(normalizeProduct(data, []));
+    state.pendingImageFile = null;
+    render();
+    closeProductModal();
+    setSyncStatus("产品已保存到 Supabase");
+  }
+
+  async function updateProduct(id, payload) {
+    const user = await requireCurrentUser();
+    if (!user) return;
+    const row = toProductRow(id, payload, user.id);
+    delete row.id;
+    delete row.user_id;
+    delete row.created_at;
+
+    const { data, error } = await supabaseClient
+      .from("products")
+      .update(row)
+      .eq("id", id)
+      .eq("user_id", user.id)
+      .select()
+      .single();
+
+    if (error) {
+      setSyncStatus(`保存失败：${error.message}`);
+      return;
+    }
+
+    const index = state.products.findIndex((item) => item.id === id);
+    const timeline = index === -1 ? [] : state.products[index].timeline;
+    const normalized = normalizeProduct(data, timeline);
+    if (index !== -1) state.products[index] = normalized;
+    state.pendingImageFile = null;
+    render();
+    closeProductModal();
+    setSyncStatus("产品已更新到 Supabase");
+  }
+
+  function toProductRow(id, product, userId) {
+    const now = new Date().toISOString();
+    return {
+      id,
+      user_id: userId || state.user.id,
+      name: product.name,
+      sku: product.sku,
+      factory: product.factoryName,
+      factory_contact: product.factoryContact || null,
+      owner: product.owner,
+      image_url: product.image || null,
+      start_date: product.startDate,
+      due_date: product.dueDate,
+      status: product.stage,
+      risk: product.risk,
+      note: product.notes || null,
+      updated_at: now,
+      created_at: product.createdAt || now
+    };
+  }
+
+  async function deleteProduct(id) {
+    const user = await requireCurrentUser();
+    if (!user) return;
     const product = findProduct(id);
     if (!product) return;
     const ok = confirm(`确认删除产品「${product.name}」吗？此操作不可恢复。`);
     if (!ok) return;
+
+    setSyncStatus("正在删除产品...");
+    const { error } = await supabaseClient
+      .from("products")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", user.id);
+
+    if (error) {
+      setSyncStatus(`删除失败：${error.message}`);
+      return;
+    }
+
     state.products = state.products.filter((item) => item.id !== id);
-    saveData();
+    if (state.selectedProductId === id) closeDetailModal();
     render();
+    setSyncStatus("产品已删除");
   }
 
   function handleImageUpload(event) {
@@ -376,13 +674,44 @@
       return;
     }
 
+    state.pendingImageFile = file;
     const reader = new FileReader();
     reader.onload = () => {
-      els.imageData.value = reader.result;
+      els.imageData.value = "";
       renderImagePreview(reader.result);
     };
     reader.onerror = () => alert("图片读取失败，请重试。");
     reader.readAsDataURL(file);
+  }
+
+  async function uploadProductImage(file, productId) {
+    const user = await requireCurrentUser();
+    if (!user) return "";
+    const extension = getFileExtension(file.name);
+    const path = `${user.id}/${productId}/${crypto.randomUUID()}.${extension}`;
+    const { error } = await supabaseClient.storage
+      .from(IMAGE_BUCKET)
+      .upload(path, file, {
+        cacheControl: "3600",
+        contentType: file.type || "image/jpeg",
+        upsert: false
+      });
+
+    if (error) {
+      setSyncStatus(`图片上传失败：${error.message}`);
+      return "";
+    }
+
+    const { data } = supabaseClient.storage.from(IMAGE_BUCKET).getPublicUrl(path);
+    return data.publicUrl;
+  }
+
+  async function uploadImageDataUrl(dataUrl, productId) {
+    const response = await fetch(dataUrl);
+    const blob = await response.blob();
+    const extension = blob.type.split("/")[1] || "jpg";
+    const file = new File([blob], `legacy-image.${extension}`, { type: blob.type || "image/jpeg" });
+    return uploadProductImage(file, productId);
   }
 
   function renderImagePreview(src) {
@@ -396,6 +725,7 @@
   function clearImage() {
     els.productImage.value = "";
     els.imageData.value = "";
+    state.pendingImageFile = null;
     renderImagePreview("");
   }
 
@@ -500,49 +830,91 @@
     });
   }
 
-  function handleTimelineSubmit(event) {
+  async function handleTimelineSubmit(event) {
     event.preventDefault();
+    const user = await requireCurrentUser();
+    if (!user) return;
     const product = findProduct(state.selectedProductId);
     if (!product) return;
 
     const form = event.currentTarget;
     if (!form.reportValidity()) return;
 
-    const item = {
-      id: createId("timeline"),
-      recordTime: document.getElementById("recordTime").value,
-      actionType: document.getElementById("actionType").value,
+    const row = {
+      id: crypto.randomUUID(),
+      product_id: product.id,
+      user_id: user.id,
+      log_date: toIsoFromLocal(document.getElementById("recordTime").value),
+      type: document.getElementById("actionType").value,
       content: trimValue(document.getElementById("recordContent")),
-      nextAction: trimValue(document.getElementById("nextAction")),
-      nextDeadline: document.getElementById("nextDeadline").value,
+      next_step: trimValue(document.getElementById("nextAction")) || null,
+      deadline: document.getElementById("nextDeadline").value || null,
       status: document.getElementById("timelineStatus").value,
-      notes: trimValue(document.getElementById("timelineNotes")),
-      createdAt: new Date().toISOString()
+      note: trimValue(document.getElementById("timelineNotes")) || null
     };
 
+    setSyncStatus("正在保存时间线...");
+    const { data, error } = await supabaseClient
+      .from("product_logs")
+      .insert(row)
+      .select()
+      .single();
+
+    if (error) {
+      setSyncStatus(`保存时间线失败：${error.message}`);
+      return;
+    }
+
+    await touchProduct(product.id);
     product.timeline = Array.isArray(product.timeline) ? product.timeline : [];
-    product.timeline.push(item);
+    product.timeline.push(normalizeLog(data));
     product.updatedAt = new Date().toISOString();
-    saveData();
     render();
     renderDetail(product);
+    setSyncStatus("时间线已保存");
   }
 
-  function deleteTimelineItem(timelineId) {
+  async function deleteTimelineItem(timelineId) {
+    const user = await requireCurrentUser();
+    if (!user) return;
     const product = findProduct(state.selectedProductId);
     if (!product) return;
     const ok = confirm("确认删除这条时间线记录吗？");
     if (!ok) return;
+
+    const { error } = await supabaseClient
+      .from("product_logs")
+      .delete()
+      .eq("id", timelineId)
+      .eq("user_id", user.id);
+
+    if (error) {
+      setSyncStatus(`删除时间线失败：${error.message}`);
+      return;
+    }
+
+    await touchProduct(product.id);
     product.timeline = (product.timeline || []).filter((item) => item.id !== timelineId);
     product.updatedAt = new Date().toISOString();
-    saveData();
     render();
     renderDetail(product);
+    setSyncStatus("时间线已删除");
+  }
+
+  async function touchProduct(productId) {
+    const user = await requireCurrentUser();
+    if (!user) return;
+    await supabaseClient
+      .from("products")
+      .update({ updated_at: new Date().toISOString() })
+      .eq("id", productId)
+      .eq("user_id", user.id);
   }
 
   function exportData() {
     const data = {
-      version: 1,
+      version: 2,
+      source: "supabase",
       exportedAt: new Date().toISOString(),
       products: state.products
     };
@@ -562,7 +934,7 @@
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       try {
         const parsed = JSON.parse(reader.result);
         const checked = validateImportData(parsed);
@@ -570,16 +942,14 @@
           alert(`导入失败：${checked.message}`);
           return;
         }
-        const ok = confirm(`确认导入 ${checked.products.length} 个产品吗？当前数据将被覆盖。`);
+        const ok = confirm(`确认导入 ${checked.products.length} 个产品吗？当前云端数据将被覆盖。`);
         if (!ok) return;
-        state.products = checked.products;
-        saveData();
-        render();
+        await uploadProductsToCloud(checked.products, { replace: true });
         closeDetailModal();
         closeProductModal();
-        alert("导入成功。");
+        alert("导入成功，数据已保存到 Supabase。");
       } catch (error) {
-        alert("导入失败：JSON 文件无法解析。");
+        alert(`导入失败：${error.message || "JSON 文件无法解析。"}`);
       } finally {
         els.importFileInput.value = "";
       }
@@ -589,6 +959,83 @@
       els.importFileInput.value = "";
     };
     reader.readAsText(file, "utf-8");
+  }
+
+  async function migrateLocalData() {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      alert("没有检测到旧的本地数据。");
+      return;
+    }
+
+    const checked = validateImportData(JSON.parse(raw));
+    if (!checked.valid || checked.products.length === 0) {
+      alert("旧本地数据为空或格式不正确，无法迁移。");
+      return;
+    }
+
+    const ok = confirm(`检测到 ${checked.products.length} 个旧本地产品，是否上传到当前账号的 Supabase？`);
+    if (!ok) return;
+
+    await uploadProductsToCloud(checked.products, { replace: false });
+    const clear = confirm("迁移成功。是否清空旧 localStorage 数据？");
+    if (clear) localStorage.removeItem(STORAGE_KEY);
+    updateMigrationButton();
+  }
+
+  async function uploadProductsToCloud(products, options) {
+    const user = await requireCurrentUser();
+    if (!user) throw new Error("请先登录。");
+    const replace = Boolean(options && options.replace);
+    setSyncStatus(replace ? "正在覆盖导入云端数据..." : "正在迁移本地数据到云端...");
+
+    const productRows = [];
+    const logRows = [];
+
+    for (const product of products) {
+      const productId = isUuid(product.id) ? product.id : crypto.randomUUID();
+      let imageUrl = product.image || "";
+      if (isImageDataUrl(imageUrl)) {
+        imageUrl = await uploadImageDataUrl(imageUrl, productId);
+      }
+
+      productRows.push(toProductRow(productId, { ...product, image: imageUrl }, user.id));
+      (product.timeline || []).forEach((item) => {
+        logRows.push({
+          id: isUuid(item.id) ? item.id : crypto.randomUUID(),
+          product_id: productId,
+          user_id: user.id,
+          log_date: toIsoFromLocal(item.recordTime),
+          type: item.actionType,
+          content: item.content,
+          next_step: item.nextAction || null,
+          deadline: item.nextDeadline || null,
+          status: item.status,
+          note: item.notes || null,
+          created_at: item.createdAt || new Date().toISOString()
+        });
+      });
+    }
+
+    if (replace) {
+      const { error } = await supabaseClient
+        .from("products")
+        .delete()
+        .eq("user_id", user.id);
+      if (error) throw new Error(error.message);
+    }
+
+    if (productRows.length) {
+      const { error } = await supabaseClient.from("products").insert(productRows);
+      if (error) throw new Error(error.message);
+    }
+    if (logRows.length) {
+      const { error } = await supabaseClient.from("product_logs").insert(logRows);
+      if (error) throw new Error(error.message);
+    }
+
+    await loadCloudData();
+    setSyncStatus(replace ? "导入完成" : "迁移完成");
   }
 
   function validateImportData(input) {
@@ -606,11 +1053,14 @@
       if (!isPlainObject(product)) {
         return { valid: false, message: `第 ${index + 1} 个产品格式不正确。` };
       }
-      const required = ["name", "sku", "factoryName", "owner", "startDate", "dueDate", "stage", "risk"];
+      const required = ["name", "sku", "owner", "startDate", "dueDate", "stage", "risk"];
       for (const key of required) {
         if (!String(product[key] || "").trim()) {
           return { valid: false, message: `第 ${index + 1} 个产品缺少字段：${key}。` };
         }
+      }
+      if (!String(product.factoryName || product.factory || "").trim()) {
+        return { valid: false, message: `第 ${index + 1} 个产品缺少字段：factoryName。` };
       }
       if (!STAGES.includes(product.stage)) {
         return { valid: false, message: `第 ${index + 1} 个产品的当前阶段无效。` };
@@ -639,7 +1089,7 @@
           return { valid: false, message: `第 ${index + 1} 个产品的第 ${tIndex + 1} 条时间线状态无效。` };
         }
         cleanedTimeline.push({
-          id: String(item.id || createId("timeline")),
+          id: String(item.id || crypto.randomUUID()),
           recordTime: String(item.recordTime),
           actionType: String(item.actionType),
           content: String(item.content).slice(0, 500),
@@ -652,35 +1102,47 @@
       }
 
       cleaned.push({
-        id: String(product.id || createId("product")),
+        id: String(product.id || crypto.randomUUID()),
         name: String(product.name).trim().slice(0, 80),
         sku: String(product.sku).trim().slice(0, 60),
-        factoryName: String(product.factoryName).trim().slice(0, 80),
-        factoryContact: String(product.factoryContact || "").trim().slice(0, 80),
+        factoryName: String(product.factoryName || product.factory).trim().slice(0, 80),
+        factoryContact: String(product.factoryContact || product.factory_contact || "").trim().slice(0, 80),
         owner: String(product.owner).trim().slice(0, 60),
-        image: isSafeImageData(product.image) ? product.image : "",
+        image: isSafeImageValue(product.image || product.image_url) ? String(product.image || product.image_url || "") : "",
         startDate: product.startDate,
         dueDate: product.dueDate,
         stage: product.stage,
         risk: product.risk,
-        notes: String(product.notes || "").slice(0, 500),
+        notes: String(product.notes || product.note || "").slice(0, 500),
         timeline: cleanedTimeline,
-        createdAt: String(product.createdAt || new Date().toISOString()),
-        updatedAt: String(product.updatedAt || new Date().toISOString())
+        createdAt: String(product.createdAt || product.created_at || new Date().toISOString()),
+        updatedAt: String(product.updatedAt || product.updated_at || new Date().toISOString())
       });
     }
 
     return { valid: true, products: cleaned };
   }
 
-  function clearAllData() {
-    const ok = confirm("确认清空全部产品和时间线数据吗？此操作不可恢复。");
+  async function clearAllData() {
+    const user = await requireCurrentUser();
+    if (!user) return;
+    const ok = confirm("确认清空当前账号的全部产品和时间线数据吗？此操作不可恢复。");
     if (!ok) return;
+    const { error } = await supabaseClient
+      .from("products")
+      .delete()
+      .eq("user_id", user.id);
+
+    if (error) {
+      setSyncStatus(`清空失败：${error.message}`);
+      return;
+    }
+
     state.products = [];
-    saveData();
     render();
     closeDetailModal();
     closeProductModal();
+    setSyncStatus("云端数据已清空");
   }
 
   function resetFilters() {
@@ -763,112 +1225,47 @@
     if (!els.detailModal.classList.contains("hidden")) closeDetailModal();
   }
 
-  function getDefaultProducts() {
-    const today = getToday();
-    const inFiveDays = addDays(today, 5);
-    const overdueDate = addDays(today, -3);
-    const futureDate = addDays(today, 24);
+  function updateMigrationButton() {
+    if (!els.migrateLocalBtn) return;
+    els.migrateLocalBtn.disabled = !hasLegacyLocalData();
+    els.migrateLocalBtn.title = els.migrateLocalBtn.disabled ? "未检测到旧 localStorage 数据" : "";
+  }
 
-    return [
-      {
-        id: createId("product"),
-        name: "便携式咖啡保温杯",
-        sku: "MUG-2026-001",
-        factoryName: "宁波恒远五金制品厂",
-        factoryContact: "张经理 13800000001",
-        owner: "李明",
-        image: "",
-        startDate: toDateInput(addDays(today, -14)),
-        dueDate: toDateInput(inFiveDays),
-        stage: "生产中",
-        risk: "关注",
-        notes: "首批 3000 件，重点关注杯盖密封件交付。",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        timeline: [
-          {
-            id: createId("timeline"),
-            recordTime: toDateTimeInput(addHours(new Date(), -22)),
-            actionType: "生产",
-            content: "工厂反馈杯身喷涂已完成 60%，杯盖密封圈供应商本周内补齐。",
-            nextAction: "确认密封圈到料时间并安排中期抽检。",
-            nextDeadline: toDateInput(addDays(today, 2)),
-            status: "进行中",
-            notes: "需要采购同事同步供应商排产。",
-            createdAt: new Date().toISOString()
-          },
-          {
-            id: createId("timeline"),
-            recordTime: toDateTimeInput(addDays(today, -8)),
-            actionType: "确认",
-            content: "产前样颜色、丝印和包装确认通过。",
-            nextAction: "进入大货生产。",
-            nextDeadline: toDateInput(addDays(today, -7)),
-            status: "已完成",
-            notes: "",
-            createdAt: new Date().toISOString()
-          }
-        ]
-      },
-      {
-        id: createId("product"),
-        name: "桌面收纳盒套装",
-        sku: "ORG-SET-088",
-        factoryName: "东莞佳合塑胶有限公司",
-        factoryContact: "王工 13800000002",
-        owner: "周宁",
-        image: "",
-        startDate: toDateInput(addDays(today, -30)),
-        dueDate: toDateInput(overdueDate),
-        stage: "验货中",
-        risk: "已逾期",
-        notes: "外箱标签版本曾变更，验货需核对新版条码。",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        timeline: [
-          {
-            id: createId("timeline"),
-            recordTime: toDateTimeInput(addHours(new Date(), -8)),
-            actionType: "验货",
-            content: "AQL 初检发现 2 箱外箱标签贴错，已要求工厂全检返工。",
-            nextAction: "明天复检标签和装箱数量。",
-            nextDeadline: toDateInput(addDays(today, 1)),
-            status: "待处理",
-            notes: "该项目已超过原交期。",
-            createdAt: new Date().toISOString()
-          }
-        ]
-      },
-      {
-        id: createId("product"),
-        name: "户外折叠营地灯",
-        sku: "LAMP-CAMP-320",
-        factoryName: "深圳明照电子科技",
-        factoryContact: "陈小姐 13800000003",
-        owner: "王倩",
-        image: "",
-        startDate: toDateInput(addDays(today, -6)),
-        dueDate: toDateInput(futureDate),
-        stage: "打样中",
-        risk: "正常",
-        notes: "客户要求暖白光和三档亮度，样品寄出前拍视频确认。",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        timeline: [
-          {
-            id: createId("timeline"),
-            recordTime: toDateTimeInput(addDays(today, -2)),
-            actionType: "打样",
-            content: "结构样已开模，预计 3 天后完成手板装配。",
-            nextAction: "收到样品照片后确认按键手感。",
-            nextDeadline: toDateInput(addDays(today, 3)),
-            status: "进行中",
-            notes: "",
-            createdAt: new Date().toISOString()
-          }
-        ]
-      }
-    ];
+  function hasLegacyLocalData() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return false;
+      const checked = validateImportData(JSON.parse(raw));
+      return checked.valid && checked.products.length > 0;
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function setAuthBusy(isBusy) {
+    els.loginBtn.disabled = isBusy;
+    els.registerBtn.disabled = isBusy;
+  }
+
+  function setAuthMessage(message, success) {
+    els.authMessage.textContent = message || "";
+    els.authMessage.classList.toggle("success", Boolean(success));
+  }
+
+  function setSyncStatus(message) {
+    els.syncStatus.textContent = message || "";
+  }
+
+  async function requireCurrentUser() {
+    const { data, error } = await supabaseClient.auth.getUser();
+    if (error || !data.user) {
+      state.user = null;
+      state.session = null;
+      showAuth("登录状态已失效，请重新登录。");
+      return null;
+    }
+    state.user = data.user;
+    return data.user;
   }
 
   function normalize(value) {
@@ -877,10 +1274,6 @@
 
   function trimValue(input) {
     return String(input.value || "").trim();
-  }
-
-  function createId(prefix) {
-    return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   }
 
   function getToday() {
@@ -917,6 +1310,13 @@
     return `${year}-${month}-${day}T${hour}:${minute}`;
   }
 
+  function toIsoFromLocal(value) {
+    if (!value) return new Date().toISOString();
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return new Date().toISOString();
+    return date.toISOString();
+  }
+
   function formatDate(value) {
     if (!value) return "-";
     return String(value).slice(0, 10);
@@ -924,28 +1324,30 @@
 
   function formatDateTime(value) {
     if (!value) return "-";
-    return String(value).replace("T", " ").slice(0, 16);
-  }
-
-  function addDays(date, days) {
-    const d = new Date(date);
-    d.setDate(d.getDate() + days);
-    return d;
-  }
-
-  function addHours(date, hours) {
-    const d = new Date(date);
-    d.setHours(d.getHours() + hours);
-    return d;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value).replace("T", " ").slice(0, 16);
+    return toDateTimeInput(date).replace("T", " ");
   }
 
   function isPlainObject(value) {
     return Object.prototype.toString.call(value) === "[object Object]";
   }
 
-  function isSafeImageData(value) {
+  function isSafeImageValue(value) {
     if (!value) return true;
+    return isImageDataUrl(value) || /^https:\/\/[\w.-]+/i.test(String(value));
+  }
+
+  function isImageDataUrl(value) {
     return typeof value === "string" && /^data:image\/(png|jpe?g|gif|webp);base64,/i.test(value);
+  }
+
+  function isUuid(value) {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
+  }
+
+  function getFileExtension(name) {
+    return String(name || "image.jpg").split(".").pop().toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
   }
 
   function escapeHtml(value) {

@@ -7,17 +7,44 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="app-shell">
+  <section class="auth-shell" id="authView">
+    <div class="auth-card">
+      <p class="eyebrow">Supabase Sync</p>
+      <h1>供应链进度管理面板</h1>
+      <p class="auth-copy">登录后，产品、时间线和图片会同步到 Supabase，支持多设备查看与编辑。</p>
+      <form id="authForm" class="auth-form">
+        <div class="field required">
+          <label for="authEmail">邮箱</label>
+          <input id="authEmail" type="email" autocomplete="email" required>
+        </div>
+        <div class="field required">
+          <label for="authPassword">密码</label>
+          <input id="authPassword" type="password" autocomplete="current-password" minlength="6" required>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-primary" id="loginBtn" type="submit">登录</button>
+          <button class="btn" id="registerBtn" type="button">注册</button>
+        </div>
+        <p class="auth-message" id="authMessage"></p>
+      </form>
+    </div>
+  </section>
+
+  <div class="app-shell hidden" id="appShell">
     <header class="topbar">
       <div>
         <p class="eyebrow">Supply Chain Dashboard</p>
         <h1>供应链进度管理面板</h1>
+        <p class="sync-status" id="syncStatus">正在连接 Supabase...</p>
       </div>
       <div class="top-actions">
+        <span class="user-pill" id="userInfo"></span>
         <button class="btn btn-primary" id="addProductBtn" type="button">新增产品</button>
         <button class="btn" id="importBtn" type="button">导入数据</button>
         <button class="btn" id="exportBtn" type="button">导出数据</button>
+        <button class="btn" id="migrateLocalBtn" type="button">迁移旧本地数据</button>
         <button class="btn btn-danger-soft" id="clearAllBtn" type="button">清空数据</button>
+        <button class="btn" id="signOutBtn" type="button">退出登录</button>
         <input id="importFileInput" type="file" accept="application/json,.json" hidden>
       </div>
     </header>
@@ -211,6 +238,7 @@
     </form>
   </template>
 
-  <script src="app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="app.js?v=20260616-realtime"></script>
 </body>
 </html>
