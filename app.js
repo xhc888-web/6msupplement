@@ -165,6 +165,7 @@
     });
 
     els.productGrid.addEventListener("click", handleProductGridClick);
+    els.detailBody.addEventListener("click", handleDetailBodyClick);
     els.productModal.addEventListener("click", closeModalOnBackdrop);
     els.detailModal.addEventListener("click", closeModalOnBackdrop);
     document.addEventListener("keydown", handleEscape);
@@ -818,9 +819,17 @@
     const submitButton = form.querySelector("button.btn-primary");
     if (submitButton) {
       submitButton.type = "button";
-      submitButton.addEventListener("click", () => saveTimelineFromForm(form));
     }
     form.addEventListener("submit", handleTimelineSubmit);
+  }
+
+  function handleDetailBodyClick(event) {
+    const button = event.target.closest("button");
+    if (!button) return;
+    const form = button.closest("#timelineForm");
+    if (!form || !button.classList.contains("btn-primary")) return;
+    event.preventDefault();
+    saveTimelineFromForm(form);
   }
 
   function renderTimelineList(product) {
@@ -863,13 +872,27 @@
   }
 
   async function saveTimelineFromForm(form) {
-    const user = await requireCurrentUser();
-    if (!user) return;
-    const product = findProduct(state.selectedProductId);
-    if (!product) return;
+    if (form.dataset.saving === "true") return;
+    form.dataset.saving = "true";
+    setTimelineFormMessage("正在准备保存时间线...", true);
 
-    if (!form.reportValidity()) return;
-    const submitButton = form.querySelector('button[type="submit"]');
+    const user = await requireCurrentUser();
+    if (!user) {
+      form.dataset.saving = "false";
+      return;
+    }
+    const product = findProduct(state.selectedProductId);
+    if (!product) {
+      form.dataset.saving = "false";
+      setTimelineFormMessage("添加记录失败：没有找到当前产品，请关闭详情后重新打开。");
+      return;
+    }
+
+    if (!form.reportValidity()) {
+      form.dataset.saving = "false";
+      return;
+    }
+    const submitButton = form.querySelector("button.btn-primary");
     setTimelineFormMessage("");
     if (submitButton) submitButton.disabled = true;
 
@@ -915,6 +938,7 @@
       setTimelineFormMessage(message);
       alert(message);
     } finally {
+      form.dataset.saving = "false";
       if (submitButton) submitButton.disabled = false;
     }
   }
@@ -1329,15 +1353,28 @@
   }
 
   async function requireCurrentUser() {
-    const { data, error } = await supabaseClient.auth.getUser();
-    if (error || !data.user) {
+    if (state.user) {
+      return state.user;
+    }
+
+    if (state.session && state.session.user) {
+      state.user = state.session.user;
+      return state.user;
+    }
+
+    const { data } = await supabaseClient.auth.getSession();
+    if (data.session && data.session.user) {
+      state.session = data.session;
+      state.user = data.session.user;
+      return state.user;
+    }
+
+    {
       state.user = null;
       state.session = null;
       showAuth("登录状态已失效，请重新登录。");
       return null;
     }
-    state.user = data.user;
-    return data.user;
   }
 
   function normalize(value) {
