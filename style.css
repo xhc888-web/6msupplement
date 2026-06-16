@@ -565,6 +565,18 @@ textarea:focus {
   justify-content: flex-end;
 }
 
+.form-message {
+  flex: 1 1 260px;
+  margin: 0;
+  color: var(--red);
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.form-message.success {
+  color: var(--green);
+}
+
 .detail-layout {
   display: grid;
   grid-template-columns: 320px 1fr;

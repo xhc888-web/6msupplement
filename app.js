@@ -839,6 +839,9 @@
 
     const form = event.currentTarget;
     if (!form.reportValidity()) return;
+    const submitButton = form.querySelector('button[type="submit"]');
+    setTimelineFormMessage("");
+    if (submitButton) submitButton.disabled = true;
 
     const row = {
       id: crypto.randomUUID(),
@@ -854,6 +857,7 @@
     };
 
     setSyncStatus("正在保存时间线...");
+    setTimelineFormMessage("正在保存时间线...", true);
     const { data, error } = await supabaseClient
       .from("product_logs")
       .insert(row)
@@ -861,7 +865,9 @@
       .single();
 
     if (error) {
+      if (submitButton) submitButton.disabled = false;
       setSyncStatus(`保存时间线失败：${error.message}`);
+      setTimelineFormMessage(`添加记录失败：${error.message}`);
       return;
     }
 
@@ -872,6 +878,7 @@
     render();
     renderDetail(product);
     setSyncStatus("时间线已保存");
+    if (submitButton) submitButton.disabled = false;
   }
 
   async function deleteTimelineItem(timelineId) {
@@ -1254,6 +1261,24 @@
 
   function setSyncStatus(message) {
     els.syncStatus.textContent = message || "";
+  }
+
+  function setTimelineFormMessage(message, success) {
+    const form = document.getElementById("timelineForm");
+    if (!form) return;
+
+    let messageEl = document.getElementById("timelineFormMessage");
+    if (!messageEl) {
+      messageEl = document.createElement("p");
+      messageEl.id = "timelineFormMessage";
+      messageEl.className = "form-message";
+      const actions = form.querySelector(".form-actions");
+      if (actions) actions.prepend(messageEl);
+      else form.appendChild(messageEl);
+    }
+
+    messageEl.textContent = message || "";
+    messageEl.classList.toggle("success", Boolean(success));
   }
 
   async function requireCurrentUser() {
